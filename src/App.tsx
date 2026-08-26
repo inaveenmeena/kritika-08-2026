@@ -1,335 +1,105 @@
-import {useCallback, useEffect, useRef, useState} from 'react';
-import {motion} from 'motion/react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {AnimatePresence, motion} from 'motion/react';
 import Matter from 'matter-js';
 import confetti from 'canvas-confetti';
 
 const GLYPHS = ['K', 'r', 'i', 't', 'i', 'k', 'a'];
-const HELLO_COLORS = ['#32b9ad', '#e2b321', '#f08a3c', '#eb5b61', '#d85b9d', '#886bd8', '#4f83d8'];
+const COLORS = ['#32b9ad', '#e2b321', '#f08a3c', '#eb5b61', '#d85b9d', '#886bd8', '#4f83d8'];
 const MESSAGE = 'You see how these letters always come back together? Similarly, no matter what life throws at you, you always pull yourself together — my superwoman.';
-const AFFECTION_LINE = 'I love you ❤️';
-const LOVE_LINE = 'Happy 3 years, my love.';
+const AFFECTION = 'I love you ❤️';
+const LOVE = 'Happy 3 years, my love.';
 type Phase = 'play' | 'settling' | 'complete';
-
+type SoundKind = 'throw' | 'magnet' | 'heart';
 type CharacterToken = {character: string; index: number};
 type WordToken = {characters: CharacterToken[]};
+const seeded = (value: number) => {const n = Math.sin(value * 12.9898 + 78.233) * 43758.5453; return n - Math.floor(n);};
+const split = (value: string) => Array.from(value).reduce<string[]>((out, char) => {if (char === '\uFE0F' && out.length) out[out.length - 1] += char; else out.push(char); return out;}, []);
+function makeWords(text: string, start = 0) {let index = start; const words = text.split(' ').filter(Boolean).map(word => ({characters: split(word).map(character => ({character, index: index++}))})); return {words, next: index};}
+const messageData = makeWords(MESSAGE), affectionData = makeWords(AFFECTION, messageData.next), loveData = makeWords(LOVE, affectionData.next);
+const CHARACTERS = [...messageData.words, ...affectionData.words, ...loveData.words].flatMap(word => word.characters);
 
-function makeWords(text: string, start = 0) {
-  let index = start;
-  const words: WordToken[] = text.split(' ').filter(Boolean).map(word => ({
-    characters: Array.from(word).reduce<string[]>((graphemes, character) => {
-      if (character === '\uFE0F' && graphemes.length) graphemes[graphemes.length - 1] += character;
-      else graphemes.push(character);
-      return graphemes;
-    }, []).map(character => ({character, index: index++})),
-  }));
-  return {words, next: index};
+type FrameCallback = (now: number) => void;
+const frameCallbacks = new Set<FrameCallback>();
+let sharedFrame: number | null = null;
+const runSharedFrame = (now: number) => {
+  frameCallbacks.forEach(callback => callback(now));
+  sharedFrame = frameCallbacks.size ? requestAnimationFrame(runSharedFrame) : null;
+};
+const subscribeFrame = (callback: FrameCallback) => {
+  frameCallbacks.add(callback);
+  if (sharedFrame === null) sharedFrame = requestAnimationFrame(runSharedFrame);
+  return () => {
+    frameCallbacks.delete(callback);
+    if (!frameCallbacks.size && sharedFrame !== null) {
+      cancelAnimationFrame(sharedFrame);
+      sharedFrame = null;
+    }
+  };
+};
+
+function useSoundEngine(enabled: boolean) {
+  const contextRef = useRef<AudioContext | null>(null), enabledRef = useRef(enabled);
+  useEffect(() => {enabledRef.current = enabled;}, [enabled]);
+  const unlock = useCallback(async () => {if (!contextRef.current) contextRef.current = new AudioContext(); if (contextRef.current.state === 'suspended') await contextRef.current.resume(); return contextRef.current;}, []);
+  const play = useCallback(async (kind: SoundKind) => {if (!enabledRef.current) return; const context = await unlock(), now = context.currentTime;
+    const tone = (frequency: number, start: number, duration: number, volume: number, type: OscillatorType = 'sine') => {const oscillator = context.createOscillator(), gain = context.createGain(); oscillator.type = type; oscillator.frequency.setValueAtTime(frequency, now + start); oscillator.frequency.exponentialRampToValueAtTime(Math.max(60, frequency * .72), now + start + duration); gain.gain.setValueAtTime(.0001, now + start); gain.gain.exponentialRampToValueAtTime(volume, now + start + .025); gain.gain.exponentialRampToValueAtTime(.0001, now + start + duration); oscillator.connect(gain).connect(context.destination); oscillator.start(now + start); oscillator.stop(now + start + duration + .03);};
+    if (kind === 'throw') tone(310, 0, .16, .025, 'triangle'); if (kind === 'magnet') tone(520, 0, .22, .018); if (kind === 'heart') {tone(92, 0, .18, .055); tone(82, .24, .2, .045);}
+  }, [unlock]);
+  return useMemo(() => ({unlock, play}), [unlock, play]);
 }
 
-const messageData = makeWords(MESSAGE);
-const affectionData = makeWords(AFFECTION_LINE, messageData.next);
-const loveData = makeWords(LOVE_LINE, affectionData.next);
-const ALL_CHARACTERS = [...messageData.words, ...affectionData.words, ...loveData.words].flatMap(word => word.characters);
-const seeded = (value: number) => {
-  const result = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
-  return result - Math.floor(result);
-};
-const particlePosition = (index: number) => ({
-  left: 2 + seeded(index + 4) * 96,
-  top: 11 + seeded(index + 79) * 80,
-  rotation: -28 + seeded(index + 151) * 56,
-  duration: 10 + seeded(index + 217) * 11,
-  delay: -seeded(index + 307) * 13,
-});
-
-function AmbientMessage({revealed, progress, resetKey, onRestart}: {revealed: boolean; progress: number; resetKey: number; onRestart: () => void}) {
-  const sourceRefs = useRef<(HTMLSpanElement | null)[]>([]);
-  const targetRefs = useRef<(HTMLSpanElement | null)[]>([]);
-  const runToken = useRef(0);
-  const revealedRef = useRef(revealed);
-  const progressRef = useRef(progress);
-  const [assembled, setAssembled] = useState(false);
-
-  useEffect(() => {revealedRef.current = revealed;}, [revealed]);
-  useEffect(() => {progressRef.current = progress;}, [progress]);
-
+function AmbientMessage({revealed, progress, resetKey, onRestart, onBeat}: {revealed: boolean; progress: number; resetKey: number; onRestart: () => void; onBeat: () => void}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null), targetRefs = useRef<(HTMLSpanElement | null)[]>([]), progressRef = useRef(progress), revealedRef = useRef(revealed);
+  const [revealStage, setRevealStage] = useState(0), [assembled, setAssembled] = useState(false);
+  useEffect(() => {progressRef.current = progress;}, [progress]); useEffect(() => {revealedRef.current = revealed;}, [revealed]);
   useEffect(() => {
     type Particle = {x: number; y: number; vx: number; vy: number; angle: number; phase: number; radius: number};
-    let frame = 0;
-    let previous = performance.now();
-    const fontSize = parseFloat(getComputedStyle(sourceRefs.current[0] ?? document.documentElement).fontSize) || 20;
-    const margin = fontSize * .7;
-    const targets = targetRefs.current.map(element => {
-      const rect = element?.getBoundingClientRect();
-      return rect ? {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2} : {x: window.innerWidth / 2, y: window.innerHeight * .62};
-    });
-    const particles: Particle[] = ALL_CHARACTERS.map((_, index) => ({
-      x: margin + seeded(index + 4) * Math.max(1, window.innerWidth - margin * 2),
-      y: 92 + seeded(index + 79) * Math.max(1, window.innerHeight - 128),
-      vx: (seeded(index + 401) - .5) * 1.05,
-      vy: (seeded(index + 503) - .5) * .9,
-      angle: particlePosition(index).rotation,
-      phase: seeded(index + 607) * Math.PI * 2,
-      radius: fontSize * (.28 + seeded(index + 701) * .1),
-    }));
-
-    const draw = (now: number) => {
-      const step = Math.min(2, Math.max(.25, (now - previous) / 16.667));
-      previous = now;
-      if (!revealedRef.current) {
-        const cohesion = Math.pow(progressRef.current, 1.65);
-        const flowTime = now * .00022;
-        for (let index = 0; index < particles.length; index += 1) {
-          const particle = particles[index];
-          const target = targets[index];
-          const flowAngle = Math.sin(particle.y * .007 + flowTime + particle.phase) * 1.15 + Math.cos(particle.x * .0055 - flowTime * .8) * .82;
-          const freeFlight = 1 - cohesion * .68;
-          particle.vx += Math.cos(flowAngle) * .015 * freeFlight * step;
-          particle.vy += Math.sin(flowAngle) * .015 * freeFlight * step;
-          particle.vx += (target.x - particle.x) * .000052 * cohesion * step;
-          particle.vy += (target.y - particle.y) * .000052 * cohesion * step;
-          particle.vx *= 1 - (.0018 + .003 * cohesion) * step;
-          particle.vy *= 1 - (.0018 + .003 * cohesion) * step;
-          const speed = Math.hypot(particle.vx, particle.vy);
-          const speedLimit = 1.22 - cohesion * .42;
-          if (speed > speedLimit) {particle.vx = particle.vx / speed * speedLimit; particle.vy = particle.vy / speed * speedLimit;}
-          particle.x += particle.vx * step;
-          particle.y += particle.vy * step;
-          const desiredAngle = Math.atan2(particle.vy, particle.vx) * 4.2 + Math.sin(flowTime * 5 + particle.phase) * 4 * freeFlight;
-          particle.angle += (desiredAngle - particle.angle) * .025 * step;
-          if (particle.x < margin) {particle.x = margin; particle.vx = Math.abs(particle.vx) * .94;}
-          if (particle.x > window.innerWidth - margin) {particle.x = window.innerWidth - margin; particle.vx = -Math.abs(particle.vx) * .94;}
-          if (particle.y < 88 + margin) {particle.y = 88 + margin; particle.vy = Math.abs(particle.vy) * .94;}
-          if (particle.y > window.innerHeight - margin) {particle.y = window.innerHeight - margin; particle.vy = -Math.abs(particle.vy) * .94;}
-        }
-        for (let a = 0; a < particles.length; a += 1) {
-          for (let b = a + 1; b < particles.length; b += 1) {
-            const first = particles[a];
-            const second = particles[b];
-            const dx = second.x - first.x;
-            const dy = second.y - first.y;
-            const minimum = (first.radius + second.radius) * (1 - cohesion * .66);
-            const neighbourhood = 82;
-            const distanceSquared = dx * dx + dy * dy;
-            if (distanceSquared <= 0 || distanceSquared >= neighbourhood * neighbourhood) continue;
-            const distance = Math.sqrt(distanceSquared);
-            const nx = dx / distance;
-            const ny = dy / distance;
-            const alignment = .0015 * (1 - distance / neighbourhood) * (1 - cohesion * .35);
-            const velocityX = (second.vx - first.vx) * alignment;
-            const velocityY = (second.vy - first.vy) * alignment;
-            first.vx += velocityX;
-            first.vy += velocityY;
-            second.vx -= velocityX;
-            second.vy -= velocityY;
-            if (distance < minimum) {
-              const separation = (minimum - distance) * .018;
-              first.vx -= nx * separation;
-              first.vy -= ny * separation;
-              second.vx += nx * separation;
-              second.vy += ny * separation;
-            }
-          }
-        }
-        particles.forEach((particle, index) => {
-          const element = sourceRefs.current[index];
-          if (element) element.style.transform = `translate3d(${particle.x}px,${particle.y}px,0) translate(-50%,-50%) rotate(${particle.angle}deg)`;
-        });
-      }
-      frame = requestAnimationFrame(draw);
-    };
-    frame = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(frame);
+    const canvas = canvasRef.current, context = canvas?.getContext('2d', {alpha: true}); if (!canvas || !context) return;
+    let width = innerWidth, height = innerHeight, dpr = Math.min(devicePixelRatio || 1, 2), targets: {x: number; y: number}[] = [], previous = performance.now(), frameIndex = 0, averageFrame = 16.7;
+    const pointer = {x: width / 2, y: height / 2, vx: 0, vy: 0, down: false, active: false};
+    const fontSize = () => width <= 760 ? Math.max(15, Math.min(18, width * .042)) : Math.max(18, Math.min(25, width * .0165));
+    const resize = () => {width = innerWidth; height = innerHeight; dpr = Math.min(devicePixelRatio || 1, 2); canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr); canvas.style.width = `${width}px`; canvas.style.height = `${height}px`; context.setTransform(dpr, 0, 0, dpr, 0, 0); targets = targetRefs.current.map(el => {const r = el?.getBoundingClientRect(); return r ? {x: r.left + r.width / 2, y: r.top + r.height / 2} : {x: width / 2, y: height * .62};});};
+    resize(); const size = fontSize(), margin = size;
+    const particles: Particle[] = CHARACTERS.map((_, i) => ({x: margin + seeded(i + 4) * (width - margin * 2), y: 92 + seeded(i + 79) * (height - 126), vx: (seeded(i + 401) - .5) * 1.1, vy: (seeded(i + 503) - .5) * .95, angle: (seeded(i + 151) - .5) * 42, phase: seeded(i + 607) * Math.PI * 2, radius: size * (.27 + seeded(i + 701) * .1)}));
+    const move = (event: PointerEvent) => {pointer.vx = event.clientX - pointer.x; pointer.vy = event.clientY - pointer.y; pointer.x = event.clientX; pointer.y = event.clientY; pointer.active = true;}; const down = () => {pointer.down = true;}; const up = () => {pointer.down = false;};
+    addEventListener('resize', resize); addEventListener('pointermove', move, {passive: true}); addEventListener('pointerdown', down, {passive: true}); addEventListener('pointerup', up, {passive: true});
+    const loop = (now: number) => {
+      if (document.hidden) {previous = now; return;} const elapsed = Math.min(34, now - previous), step = elapsed / 16.667; previous = now; averageFrame = averageFrame * .96 + elapsed * .04; const stride = averageFrame > 20 ? 2 : 1;
+      const cohesion = Math.pow(progressRef.current, 1.55), free = 1 - cohesion * .72, flowTime = now * .00021, grid = new Map<string, number[]>(), cell = 84;
+      particles.forEach((particle, i) => {const target = targets[i] ?? {x: width / 2, y: height * .62}, flow = Math.sin(particle.y * .0065 + flowTime + particle.phase) * 1.2 + Math.cos(particle.x * .005 - flowTime) * .85; particle.vx += Math.cos(flow) * .014 * free * step + (target.x - particle.x) * .000058 * cohesion * step; particle.vy += Math.sin(flow) * .014 * free * step + (target.y - particle.y) * .000058 * cohesion * step;
+        if (pointer.active) {const dx = pointer.x - particle.x, dy = pointer.y - particle.y, distance = Math.max(28, Math.hypot(dx, dy)); if (distance < 230) {const direction = Math.hypot(pointer.vx, pointer.vy) > 16 ? -1 : 1, strength = (1 - distance / 230) * .018 * direction; if (pointer.down) {particle.vx += -dy / distance * .035 * step; particle.vy += dx / distance * .035 * step;} else {particle.vx += dx / distance * strength * step; particle.vy += dy / distance * strength * step;}}}
+        particle.vx *= 1 - (.0018 + .0032 * cohesion) * step; particle.vy *= 1 - (.0018 + .0032 * cohesion) * step; const speed = Math.hypot(particle.vx, particle.vy), limit = 1.25 - cohesion * .4; if (speed > limit) {particle.vx = particle.vx / speed * limit; particle.vy = particle.vy / speed * limit;} particle.x += particle.vx * step; particle.y += particle.vy * step; particle.angle += ((Math.atan2(particle.vy, particle.vx) * 4 + Math.sin(flowTime * 5 + particle.phase) * 4 * free) - particle.angle) * .025 * step;
+        if (particle.x < margin) {particle.x = margin; particle.vx = Math.abs(particle.vx);} if (particle.x > width - margin) {particle.x = width - margin; particle.vx = -Math.abs(particle.vx);} if (particle.y < 88 + margin) {particle.y = 88 + margin; particle.vy = Math.abs(particle.vy);} if (particle.y > height - margin) {particle.y = height - margin; particle.vy = -Math.abs(particle.vy);} const key = `${Math.floor(particle.x / cell)},${Math.floor(particle.y / cell)}`; const bucket = grid.get(key); bucket ? bucket.push(i) : grid.set(key, [i]);});
+      if (frameIndex++ % stride === 0) particles.forEach((particle, i) => {const gx = Math.floor(particle.x / cell), gy = Math.floor(particle.y / cell); for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) for (const j of grid.get(`${gx + ox},${gy + oy}`) ?? []) {if (j <= i) continue; const other = particles[j], dx = other.x - particle.x, dy = other.y - particle.y, distance = Math.hypot(dx, dy); if (!distance || distance > 82) continue; const align = .0017 * (1 - distance / 82), avx = (other.vx - particle.vx) * align, avy = (other.vy - particle.vy) * align; particle.vx += avx; particle.vy += avy; other.vx -= avx; other.vy -= avy; const minimum = (particle.radius + other.radius) * (1 - cohesion * .63); if (distance < minimum) {const push = (minimum - distance) * .017; particle.vx -= dx / distance * push; particle.vy -= dy / distance * push; other.vx += dx / distance * push; other.vy += dy / distance * push;}}});
+      context.clearRect(0, 0, width, height); context.textAlign = 'center'; context.textBaseline = 'middle'; context.font = `400 ${size}px "Kritika SF Pro", sans-serif`; context.globalAlpha = .7; const nightMode = document.querySelector('main')?.classList.contains('is-night'); particles.forEach((particle, i) => {context.save(); context.translate(particle.x, particle.y); context.rotate(particle.angle * Math.PI / 180); context.fillStyle = CHARACTERS[i].character.includes('❤') ? '#ff3b30' : nightMode ? '#f5f5f7' : '#111'; context.fillText(CHARACTERS[i].character, 0, 0); context.restore();}); pointer.vx *= .82; pointer.vy *= .82;
+    }; const unsubscribe = subscribeFrame(loop);
+    return () => {unsubscribe(); removeEventListener('resize', resize); removeEventListener('pointermove', move); removeEventListener('pointerdown', down); removeEventListener('pointerup', up);};
   }, [resetKey]);
-
-  useEffect(() => {
-    const token = ++runToken.current;
-    if (!revealed) {
-      setAssembled(false);
-      sourceRefs.current.forEach(element => {
-        if (!element) return;
-        element.getAnimations().forEach(animation => animation.cancel());
-        element.style.left = '0';
-        element.style.top = '0';
-        element.style.opacity = '';
-        element.style.filter = '';
-      });
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      const animations = sourceRefs.current.map((element, index) => {
-        const target = targetRefs.current[index];
-        if (!element || !target) return null;
-        const start = element.getBoundingClientRect();
-        const finish = target.getBoundingClientRect();
-        element.style.left = '0';
-        element.style.top = '0';
-        element.style.opacity = '.72';
-        const arc = (seeded(index + 809) - .5) * 62;
-        const startX = start.left + start.width / 2;
-        const startY = start.top + start.height / 2;
-        const finishX = finish.left + finish.width / 2;
-        const finishY = finish.top + finish.height / 2;
-        return element.animate([
-          {transform: `translate3d(${startX}px,${startY}px,0) translate(-50%,-50%) rotate(${particlePosition(index).rotation}deg)`, opacity: .72},
-          {offset: .68, transform: `translate3d(${startX + (finishX - startX) * .78 + arc}px,${startY + (finishY - startY) * .78 - Math.abs(arc) * .2}px,0) translate(-50%,-50%) rotate(${index % 2 ? 18 : -18}deg)`, opacity: .92},
-          {transform: `translate3d(${finishX}px,${finishY}px,0) translate(-50%,-50%) rotate(0deg)`, opacity: 1},
-        ], {duration: 3100 + (index % 8) * 85, delay: (index % 15) * 34, easing: 'cubic-bezier(.22,.72,.18,1)', fill: 'forwards'});
-      }).filter((animation): animation is Animation => Boolean(animation));
-
-      Promise.all(animations.map(animation => animation.finished)).then(() => {
-        if (runToken.current !== token) return;
-        setAssembled(true);
-        sourceRefs.current.forEach(element => {if (element) element.style.opacity = '0';});
-        confetti({particleCount: 62, spread: 88, startVelocity: 24, scalar: .62, origin: {y: .69}, colors: HELLO_COLORS, disableForReducedMotion: true});
-      });
-    }, 260);
-    return () => window.clearTimeout(timer);
-  }, [revealed, resetKey]);
-
-  const renderWords = (words: WordToken[]) => words.map((word, wordIndex) => <span className="message-word" key={wordIndex}>{word.characters.map(({character, index}) => <span className="message-character" key={index} ref={element => {targetRefs.current[index] = element;}}>{character}</span>)}</span>);
-
-  return <div className={`ambient-message ${revealed ? 'is-gathering' : ''} ${assembled ? 'is-assembled' : ''}`}>
-    <div className="particle-field" aria-hidden="true">{ALL_CHARACTERS.map(({character, index}) => {
-      const position = particlePosition(index);
-      return <span key={index} ref={element => {sourceRefs.current[index] = element;}} className="ambient-character" style={{left: 0, top: 0, '--float-rotation': `${position.rotation}deg`} as React.CSSProperties}>{character}</span>;
-    })}</div>
-    <div className="assembled-copy" aria-live="polite">
-      <p>{renderWords(messageData.words)}</p>
-      <div className="affection-line">{renderWords(affectionData.words)}</div>
-      <div className="love-line">{renderWords(loveData.words)}</div>
-    </div>
-    {assembled && <button className="restart" onClick={onRestart}>PLAY AGAIN <span>↻</span></button>}
-  </div>;
+  useEffect(() => {if (!revealed) {setRevealStage(0); setAssembled(false); return;} const timers = [setTimeout(() => setRevealStage(1), 450), setTimeout(() => {setRevealStage(2); onBeat();}, 1250), setTimeout(() => confetti({particleCount: 58, spread: 84, startVelocity: 23, scalar: .62, origin: {y: .68}, colors: COLORS, disableForReducedMotion: true}), 1580), setTimeout(() => setRevealStage(3), 2250), setTimeout(() => setAssembled(true), 2850)]; return () => timers.forEach(clearTimeout);}, [revealed, resetKey, onBeat]);
+  const renderWords = (words: WordToken[]) => words.map((word, wi) => <span className="message-word" key={wi}>{word.characters.map(({character, index}) => <span className="message-character" key={index} ref={el => {targetRefs.current[index] = el;}}>{character}</span>)}</span>);
+  return <div className={`ambient-message reveal-stage-${revealStage} ${revealed ? 'is-gathering' : ''} ${assembled ? 'is-assembled' : ''}`}><canvas ref={canvasRef} className="murmuration-canvas" aria-hidden="true" /><div className="assembled-copy" aria-live="polite"><p>{renderWords(messageData.words)}</p><div className="affection-line">{renderWords(affectionData.words)}</div><div className="love-line">{renderWords(loveData.words)}</div></div>{assembled && <button className="restart" onClick={onRestart}>PLAY AGAIN <span>↻</span></button>}</div>;
 }
 
 function PhysicsStage({phase, resetKey, onTouch}: {phase: Phase; resetKey: number; onTouch: (index: number) => void}) {
-  const stageRef = useRef<HTMLDivElement>(null);
-  const glyphRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  const bodiesRef = useRef<Matter.Body[]>([]);
-  const homesRef = useRef<{x: number; y: number; angle: number}[]>([]);
-  const phaseRef = useRef(phase);
-  useEffect(() => { phaseRef.current = phase; }, [phase]);
-
-  useEffect(() => {
-    let colorStep = 0;
-    const paint = () => {
-      if (phaseRef.current !== 'play') return;
-      glyphRefs.current.forEach((element, index) => {if (element) element.style.color = HELLO_COLORS[(index + colorStep) % HELLO_COLORS.length];});
-      colorStep = (colorStep + 1) % HELLO_COLORS.length;
-    };
-    const first = window.setTimeout(paint, 80);
-    const timer = window.setInterval(paint, 5600);
-    return () => {window.clearTimeout(first); window.clearInterval(timer);};
-  }, []);
-
-  useEffect(() => {
-    if (phase === 'play') return;
-    glyphRefs.current.forEach((element, index) => {if (element) element.style.color = HELLO_COLORS[index];});
-  }, [phase]);
-
-  const nudge = useCallback((index: number) => {
-    const body = bodiesRef.current[index];
-    if (!body || phaseRef.current !== 'play') return;
-    onTouch(index);
-    Matter.Body.setVelocity(body, {x: (Math.random() - .5) * 21, y: -9 - Math.random() * 8});
-    Matter.Body.setAngularVelocity(body, (Math.random() - .5) * .34);
+  const stageRef = useRef<HTMLDivElement>(null), effectsRef = useRef<HTMLCanvasElement>(null), glyphRefs = useRef<(HTMLButtonElement | null)[]>([]), bodiesRef = useRef<Matter.Body[]>([]), homesRef = useRef<{x: number; y: number; angle: number}[]>([]), phaseRef = useRef(phase); useEffect(() => {phaseRef.current = phase;}, [phase]);
+  useEffect(() => {let step = 0; const timer = setInterval(() => {if (phaseRef.current === 'play') glyphRefs.current.forEach((el, i) => {if (el) el.style.color = COLORS[(i + step) % 7];}); step = (step + 1) % 7;}, 5600); return () => clearInterval(timer);}, []); useEffect(() => {if (phase !== 'play') glyphRefs.current.forEach((el, i) => {if (el) el.style.color = COLORS[i];});}, [phase]);
+  const nudge = useCallback((i: number) => {const body = bodiesRef.current[i]; if (!body || phaseRef.current !== 'play') return; onTouch(i); Matter.Body.setVelocity(body, {x: (Math.random() - .5) * 21, y: -9 - Math.random() * 8}); Matter.Body.setAngularVelocity(body, (Math.random() - .5) * .34);}, [onTouch]);
+  useEffect(() => {const stage = stageRef.current, canvas = effectsRef.current; if (!stage || !canvas) return; const {Bodies, Body, Composite, Engine, Events, Mouse, MouseConstraint} = Matter, engine = Engine.create({enableSleeping: false}); engine.gravity.scale = 0; engine.positionIterations = 8; engine.velocityIterations = 6; const width = stage.clientWidth, height = stage.clientHeight, dpr = Math.min(devicePixelRatio || 1, 2); canvas.width = width * dpr; canvas.height = height * dpr; canvas.style.width = `${width}px`; canvas.style.height = `${height}px`; const ctx = canvas.getContext('2d'); ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const gap = width < 720 ? 2 : Math.min(5, width * .004), letterWidth = Math.min(width < 720 ? 56 : 118, (width - (width < 720 ? 36 : 210) - gap * 6) / 7), letterHeight = letterWidth * 1.38, start = (width - (letterWidth * 7 + gap * 6)) / 2 + letterWidth / 2; homesRef.current = GLYPHS.map((_, i) => ({x: start + i * (letterWidth + gap), y: height * .34, angle: 0}));
+    const bodies = GLYPHS.map((glyph, i) => Bodies.rectangle(homesRef.current[i].x, homesRef.current[i].y, letterWidth * .96, letterHeight * .9, {label: `glyph-${i}-${glyph}`, chamfer: {radius: letterWidth * .1}, restitution: .91, friction: .01, frictionAir: .0065, density: .0017})), wall = 100, bounds = [Bodies.rectangle(width / 2, -wall / 2, width + 200, wall, {isStatic: true}), Bodies.rectangle(width / 2, height + wall / 2, width + 200, wall, {isStatic: true}), Bodies.rectangle(-wall / 2, height / 2, wall, height + 200, {isStatic: true}), Bodies.rectangle(width + wall / 2, height / 2, wall, height + 200, {isStatic: true})]; bodiesRef.current = bodies; Composite.add(engine.world, [...bodies, ...bounds]); const mouse = Mouse.create(stage), mouseConstraint = MouseConstraint.create(engine, {mouse, constraint: {stiffness: .13, damping: .1} as Matter.IConstraintDefinition}); Composite.add(engine.world, mouseConstraint);
+    Events.on(engine, 'beforeUpdate', () => bodies.forEach((body, i) => {const home = homesRef.current[i], x = Math.max(letterWidth * .56, Math.min(width - letterWidth * .56, body.position.x)), y = Math.max(letterHeight * .56, Math.min(height - letterHeight * .56, body.position.y)); if (x !== body.position.x || y !== body.position.y) Body.setPosition(body, {x, y}); const dx = home.x - body.position.x, dy = home.y - body.position.y; if (phaseRef.current !== 'play') {Body.applyForce(body, body.position, {x: dx * body.mass * .00019, y: dy * body.mass * .00019}); Body.setVelocity(body, {x: body.velocity.x * .875, y: body.velocity.y * .875}); Body.setAngularVelocity(body, body.angularVelocity * .72); Body.setAngle(body, body.angle * .9);} else if (!mouseConstraint.body) {Body.applyForce(body, body.position, {x: dx * body.mass * .0000044, y: dy * body.mass * .0000044}); Body.setAngularVelocity(body, body.angularVelocity * .91); Body.setAngle(body, Math.abs(body.angle) < .0025 ? 0 : body.angle * .965);}}));
+    type Trail = {x: number; y: number; life: number; color: string; size: number}; const trails: Trail[] = []; let last = performance.now(), accumulator = 0; const fixed = 1000 / 60;
+    const tick = (now: number) => {if (document.hidden) {last = now; return;} accumulator += Math.min(50, now - last); last = now; let updates = 0; while (accumulator >= fixed && updates++ < 3) {Engine.update(engine, fixed); accumulator -= fixed;} if (ctx) {ctx.clearRect(0, 0, width, height); bodies.forEach((body, i) => {if (body.speed > 3.2 && trails.length < 110) trails.push({x: body.position.x, y: body.position.y, life: 1, color: COLORS[i], size: Math.min(18, 5 + body.speed * .7)});}); trails.forEach(t => {t.life -= .035; t.size *= .985; ctx.globalAlpha = Math.max(0, t.life) * .28; ctx.fillStyle = t.color; ctx.beginPath(); ctx.arc(t.x, t.y, t.size, 0, Math.PI * 2); ctx.fill();}); for (let i = trails.length - 1; i >= 0; i--) if (trails[i].life <= 0) trails.splice(i, 1); ctx.globalAlpha = 1; for (let a = 0; a < 7; a++) for (let b = a + 1; b < 7; b++) {const first = bodies[a], second = bodies[b], distance = Math.hypot(second.position.x - first.position.x, second.position.y - first.position.y), range = letterWidth * 1.45; if (distance < range) {ctx.strokeStyle = `rgba(27,27,29,${(1 - distance / range) * .23})`; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(first.position.x, first.position.y); ctx.quadraticCurveTo((first.position.x + second.position.x) / 2, (first.position.y + second.position.y) / 2 - (range - distance) * .18, second.position.x, second.position.y); ctx.stroke();}}}
+      bodies.forEach((body, i) => {const el = glyphRefs.current[i], lock = phaseRef.current === 'complete' || (!mouseConstraint.body && Math.abs(body.angle) < .0025); if (lock) {Body.setAngle(body, 0); Body.setAngularVelocity(body, 0);} if (el) el.style.transform = `translate3d(${body.position.x}px,${body.position.y}px,0) translate(-50%,-50%) rotate(${lock ? 0 : body.angle}rad)`;});}; const unsubscribe = subscribeFrame(tick); return () => {unsubscribe(); Mouse.clearSourceEvents(mouse); Composite.clear(engine.world, false, true); Engine.clear(engine);};
   }, [onTouch]);
-
-  useEffect(() => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    const {Bodies, Body, Composite, Engine, Events, Mouse, MouseConstraint} = Matter;
-    const engine = Engine.create({enableSleeping: false});
-    engine.gravity.scale = 0;
-    engine.positionIterations = 11;
-    engine.velocityIterations = 9;
-    let frame = 0;
-    let last = performance.now();
-    const width = stage.clientWidth;
-    const height = stage.clientHeight;
-    const gap = width < 720 ? 2 : Math.min(5, width * .004);
-    const maxLetter = width < 720 ? 56 : 118;
-    const letterWidth = Math.min(maxLetter, (width - (width < 720 ? 36 : 210) - gap * 6) / 7);
-    const letterHeight = letterWidth * 1.38;
-    const wordWidth = letterWidth * 7 + gap * 6;
-    const start = (width - wordWidth) / 2 + letterWidth / 2;
-    homesRef.current = GLYPHS.map((_, index) => ({x: start + index * (letterWidth + gap), y: height * .34, angle: 0}));
-
-    const bodies = GLYPHS.map((glyph, index) => Bodies.rectangle(homesRef.current[index].x, homesRef.current[index].y, letterWidth * .96, letterHeight * .9, {label: `glyph-${index}-${glyph}`, chamfer: {radius: letterWidth * .1}, restitution: .91, friction: .01, frictionAir: .0065, density: .0017, angle: 0}));
-    const wall = 100;
-    const boundaries = [Bodies.rectangle(width / 2, -wall / 2, width + wall * 2, wall, {isStatic: true}), Bodies.rectangle(width / 2, height + wall / 2, width + wall * 2, wall, {isStatic: true}), Bodies.rectangle(-wall / 2, height / 2, wall, height + wall * 2, {isStatic: true}), Bodies.rectangle(width + wall / 2, height / 2, wall, height + wall * 2, {isStatic: true})];
-    bodiesRef.current = bodies;
-    Composite.add(engine.world, [...bodies, ...boundaries]);
-    const mouse = Mouse.create(stage);
-    const mouseConstraint = MouseConstraint.create(engine, {mouse, constraint: {stiffness: .13, damping: .1} as Matter.IConstraintDefinition});
-    Composite.add(engine.world, mouseConstraint);
-    const beforeUpdate = () => {
-      bodies.forEach((body, index) => {
-        const home = homesRef.current[index];
-        if (!home) return;
-        const boundedX = Math.max(letterWidth * .56, Math.min(width - letterWidth * .56, body.position.x));
-        const boundedY = Math.max(letterHeight * .56, Math.min(height - letterHeight * .56, body.position.y));
-        if (boundedX !== body.position.x || boundedY !== body.position.y) Body.setPosition(body, {x: boundedX, y: boundedY});
-        const dx = home.x - body.position.x;
-        const dy = home.y - body.position.y;
-        if (phaseRef.current === 'settling' || phaseRef.current === 'complete') {
-          Body.applyForce(body, body.position, {x: dx * body.mass * .00019, y: dy * body.mass * .00019});
-          Body.setVelocity(body, {x: body.velocity.x * .875, y: body.velocity.y * .875});
-          Body.setAngularVelocity(body, body.angularVelocity * .72);
-          Body.setAngle(body, body.angle * .9);
-        } else if (!mouseConstraint.body) {
-          Body.applyForce(body, body.position, {x: dx * body.mass * .0000044, y: dy * body.mass * .0000044});
-          Body.setAngularVelocity(body, body.angularVelocity * .91);
-          Body.setAngle(body, Math.abs(body.angle) < .0025 ? 0 : body.angle * .965);
-        }
-      });
-    };
-    const tick = (now: number) => {Engine.update(engine, Math.min(32, now - last)); last = now; bodies.forEach((body, index) => {const element = glyphRefs.current[index]; const shouldLockUpright = phaseRef.current === 'complete' || (!mouseConstraint.body && Math.abs(body.angle) < .0025); if (shouldLockUpright) {Body.setAngle(body, 0); Body.setAngularVelocity(body, 0);} const angle = shouldLockUpright ? 0 : body.angle; if (element) element.style.transform = `translate3d(${body.position.x}px,${body.position.y}px,0) translate(-50%,-50%) rotate(${angle}rad)`;}); frame = requestAnimationFrame(tick);};
-    Events.on(engine, 'beforeUpdate', beforeUpdate);
-    frame = requestAnimationFrame(tick);
-    return () => {cancelAnimationFrame(frame); Events.off(engine, 'beforeUpdate', beforeUpdate); Mouse.clearSourceEvents(mouse); Composite.clear(engine.world, false, true); Engine.clear(engine);};
-  }, [onTouch]);
-
-  useEffect(() => {
-    if (phase !== 'complete') return;
-    bodiesRef.current.forEach((body, index) => {const home = homesRef.current[index]; if (!home) return; Matter.Body.setPosition(body, home); Matter.Body.setVelocity(body, {x: 0, y: 0}); Matter.Body.setAngle(body, 0); Matter.Body.setAngularVelocity(body, 0); Matter.Body.setStatic(body, true);});
-  }, [phase]);
-
-  useEffect(() => {
-    if (!resetKey) return;
-    bodiesRef.current.forEach((body, index) => {const home = homesRef.current[index]; if (!home) return; Matter.Body.setStatic(body, false); Matter.Body.setPosition(body, home); Matter.Body.setVelocity(body, {x: 0, y: 0}); Matter.Body.setAngle(body, 0); Matter.Body.setAngularVelocity(body, 0);});
-  }, [resetKey]);
-
-  return <div className={`physics-stage phase-${phase}`} ref={stageRef} aria-label="Interactive physics playground"><div className="home-line" aria-hidden="true" />{GLYPHS.map((glyph, index) => <button key={`${glyph}-${index}`} ref={element => {glyphRefs.current[index] = element;}} className="physics-letter" style={{color: HELLO_COLORS[index]}} onPointerDown={() => onTouch(index)} onKeyDown={event => {if (event.key === 'Enter' || event.key === ' ') {event.preventDefault(); nudge(index);}}} aria-label={`Move letter ${glyph}`}>{glyph}</button>)}</div>;
+  useEffect(() => {if (phase === 'complete') bodiesRef.current.forEach((body, i) => {Matter.Body.setPosition(body, homesRef.current[i]); Matter.Body.setVelocity(body, {x: 0, y: 0}); Matter.Body.setAngle(body, 0); Matter.Body.setAngularVelocity(body, 0); Matter.Body.setStatic(body, true);});}, [phase]); useEffect(() => {if (resetKey) bodiesRef.current.forEach((body, i) => {Matter.Body.setStatic(body, false); Matter.Body.setPosition(body, homesRef.current[i]); Matter.Body.setVelocity(body, {x: 0, y: 0}); Matter.Body.setAngle(body, 0); Matter.Body.setAngularVelocity(body, 0);});}, [resetKey]);
+  return <div className={`physics-stage phase-${phase}`} ref={stageRef}><canvas ref={effectsRef} className="letter-effects" aria-hidden="true" /><div className="home-line" />{GLYPHS.map((glyph, i) => <button key={`${glyph}-${i}`} ref={el => {glyphRefs.current[i] = el;}} className="physics-letter" style={{color: COLORS[i]}} onPointerDown={() => onTouch(i)} onKeyDown={event => {if (event.key === 'Enter' || event.key === ' ') {event.preventDefault(); nudge(i);}}} aria-label={`Move letter ${glyph}`}>{glyph}</button>)}</div>;
 }
 
-function Progress({count, phase}: {count: number; phase: Phase}) {
-  const progress = phase === 'complete' ? 100 : Math.round(count / GLYPHS.length * 100);
-  return <div className="progress" aria-label={`${progress}% complete`}><div className="progress-copy"><span>{phase === 'settling' ? 'PULLING TOGETHER' : phase === 'complete' ? 'FOUND HER WAY HOME' : 'MESS AROUND'}</span><b>{String(Math.min(count, 7)).padStart(2, '0')} / 07</b></div><div className="progress-track"><motion.i animate={{width: `${progress}%`}} transition={{type: 'spring', stiffness: 120, damping: 20}} /></div></div>;
-}
+function Progress({count, phase}: {count: number; phase: Phase}) {const value = phase === 'complete' ? 100 : Math.round(count / 7 * 100); return <div className="progress" aria-label={`${value}% complete`}><div className="progress-copy"><span>{phase === 'settling' ? 'PULLING TOGETHER' : phase === 'complete' ? 'FOUND HER WAY HOME' : 'MESS AROUND'}</span><b>{String(Math.min(count, 7)).padStart(2, '0')} / 07</b></div><div className="progress-track"><motion.i animate={{width: `${value}%`}} transition={{type: 'spring', stiffness: 120, damping: 20}} /></div></div>;}
 
-export default function App() {
-  const [phase, setPhase] = useState<Phase>('play');
-  const [throws, setThrows] = useState(0);
-  const [night, setNight] = useState(false);
-  const [resetKey, setResetKey] = useState(0);
-  const mainRef = useRef<HTMLElement>(null);
-  const phaseRef = useRef<Phase>('play');
-  useEffect(() => {phaseRef.current = phase;}, [phase]);
-
-  const touch = useCallback((_index: number) => {if (phaseRef.current !== 'play') return; setThrows(previous => Math.min(GLYPHS.length, previous + 1));}, []);
-  useEffect(() => {if (throws < GLYPHS.length || phase !== 'play') return; const gather = window.setTimeout(() => setPhase('settling'), 850); return () => window.clearTimeout(gather);}, [phase, throws]);
-  useEffect(() => {if (phase !== 'settling') return; setNight(false); const complete = window.setTimeout(() => setPhase('complete'), 1900); return () => window.clearTimeout(complete);}, [phase]);
-
-  const moveLight = (event: React.PointerEvent<HTMLElement>) => {mainRef.current?.style.setProperty('--cursor-x', `${event.clientX}px`); mainRef.current?.style.setProperty('--cursor-y', `${event.clientY}px`); mainRef.current?.style.setProperty('--drift-x', `${(event.clientX / window.innerWidth - .5) * 28}px`); mainRef.current?.style.setProperty('--drift-y', `${(event.clientY / window.innerHeight - .5) * 22}px`);};
-  const restart = () => {setThrows(0); setPhase('play'); setNight(false); setResetKey(value => value + 1);};
-
-  return <main ref={mainRef} onPointerMove={moveLight} className={`${night ? 'is-night' : ''} is-${phase}`}>
-    <div className="ambient" aria-hidden="true"><i /><i /><i /><i /></div><div className="grain" aria-hidden="true" /><div className="torch" aria-hidden="true" />
-    <AmbientMessage revealed={phase === 'complete'} progress={throws / GLYPHS.length} resetKey={resetKey} onRestart={restart} />
-    <header className="site-header"><a className="monogram" href="#top" aria-label="Developed by Naveen Meena">Developed by Naveen Meena</a><div className="occasion">26 · 08 · 2026 <span>THREE YEARS</span></div><button className="mode-toggle" onClick={() => setNight(value => !value)} disabled={phase !== 'play'} aria-pressed={night}><span>{night ? 'LIGHTS ON' : 'NIGHT'}</span><i>{night ? '☀' : '◐'}</i></button></header>
-    <Progress count={throws} phase={phase} />
-    <section className="playground" id="top"><div className="intro-copy"><span>HEY BABY.</span><p>{phase === 'settling' ? 'Watch everything find its place.' : phase === 'complete' ? 'Right where every piece belongs.' : night ? 'Move the torch. Find her. Throw her around.' : 'Pull them. Throw them. Try to make a mess.'}</p></div><PhysicsStage phase={phase} resetKey={resetKey} onTouch={touch} /><div className="instruction"><i aria-hidden="true">↗</i><span>{throws === 0 ? 'DRAG ANY LETTER' : throws < 7 ? `${7 - throws} ${7 - throws === 1 ? 'THROW' : 'THROWS'} TO GO` : phase === 'play' ? 'THAT SHOULD DO IT' : phase === 'settling' ? 'COMING BACK TOGETHER' : 'AND THERE SHE IS'}</span></div></section>
-  </main>;
+export default function App() {const [phase, setPhase] = useState<Phase>('play'), [throws, setThrows] = useState(0), [night, setNight] = useState(false), [sound, setSound] = useState(false), [resetKey, setResetKey] = useState(0); const mainRef = useRef<HTMLElement>(null), phaseRef = useRef<Phase>('play'), audio = useSoundEngine(sound); useEffect(() => {phaseRef.current = phase;}, [phase]);
+  const touch = useCallback((_i: number) => {if (phaseRef.current !== 'play') return; setThrows(value => Math.min(7, value + 1)); void audio.play('throw');}, [audio]); useEffect(() => {if (throws < 7 || phase !== 'play') return; const timer = setTimeout(() => setPhase('settling'), 850); return () => clearTimeout(timer);}, [throws, phase]); useEffect(() => {if (phase !== 'settling') return; setNight(false); void audio.play('magnet'); const timer = setTimeout(() => setPhase('complete'), 1900); return () => clearTimeout(timer);}, [phase, audio]);
+  const hint = throws >= 6 ? '…you pull yourself together.' : throws >= 4 ? '…life throws at you…' : throws >= 2 ? 'No matter…' : ''; const moveLight = (event: React.PointerEvent<HTMLElement>) => {mainRef.current?.style.setProperty('--cursor-x', `${event.clientX}px`); mainRef.current?.style.setProperty('--cursor-y', `${event.clientY}px`); mainRef.current?.style.setProperty('--drift-x', `${(event.clientX / innerWidth - .5) * 28}px`); mainRef.current?.style.setProperty('--drift-y', `${(event.clientY / innerHeight - .5) * 22}px`);}; const restart = () => {setThrows(0); setPhase('play'); setNight(false); setResetKey(value => value + 1);}; const toggleSound = async () => {if (!sound) await audio.unlock(); setSound(value => !value);};
+  return <main ref={mainRef} onPointerMove={moveLight} className={`${night ? 'is-night' : ''} is-${phase}`}><div className="ambient" aria-hidden="true"><i /><i /><i /><i /></div><div className="grain" aria-hidden="true" /><div className="torch" aria-hidden="true" /><AmbientMessage revealed={phase === 'complete'} progress={throws / 7} resetKey={resetKey} onRestart={restart} onBeat={() => void audio.play('heart')} /><header className="site-header"><a className="monogram" href="#top">Developed by Naveen Meena</a><div className="occasion">26 · 08 · 2026 <span>THREE YEARS</span></div><div className="header-actions"><button className="sound-toggle" onClick={toggleSound} aria-pressed={sound}>{sound ? 'SOUND ON' : 'SOUND OFF'}</button><button className="mode-toggle" onClick={() => setNight(value => !value)} disabled={phase !== 'play'} aria-pressed={night}><span>{night ? 'LIGHTS ON' : 'NIGHT'}</span><i>{night ? '☀' : '◐'}</i></button></div></header><Progress count={throws} phase={phase} /><AnimatePresence mode="wait">{hint && phase === 'play' && <motion.div key={hint} className="message-hint" initial={{opacity: 0, y: 8, filter: 'blur(5px)'}} animate={{opacity: 1, y: 0, filter: 'blur(0)'}} exit={{opacity: 0, y: -7, filter: 'blur(4px)'}}>{hint}</motion.div>}</AnimatePresence><section className="playground" id="top"><div className="intro-copy"><span>HEY BABY.</span><p>{phase === 'settling' ? 'Watch everything find its place.' : phase === 'complete' ? 'Right where every piece belongs.' : night ? 'Move the torch. Find her. Throw her around.' : 'Pull them. Throw them. Try to make a mess.'}</p></div><PhysicsStage phase={phase} resetKey={resetKey} onTouch={touch} /><div className="instruction"><i>↗</i><span>{throws === 0 ? 'DRAG ANY LETTER' : throws < 7 ? `${7 - throws} ${7 - throws === 1 ? 'THROW' : 'THROWS'} TO GO` : phase === 'play' ? 'THAT SHOULD DO IT' : phase === 'settling' ? 'COMING BACK TOGETHER' : 'AND THERE SHE IS'}</span></div></section></main>;
 }
