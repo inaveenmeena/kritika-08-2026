@@ -63,3 +63,5 @@ main,main *{font-family:var(--apple-display)!important;font-weight:400!important
 .is-night .sound-toggle{border-color:rgba(250,249,246,.22);background:rgba(8,9,12,.7)}.is-night .sound-toggle[aria-pressed="true"]{background:#faf9f6;color:#08090c}
 @media(max-width:760px){.header-actions{gap:5px}.sound-toggle{width:44px;min-width:44px;height:44px;padding:0;font-size:0}.mode-toggle{width:44px;min-width:44px;height:44px;min-height:44px}.restart{min-height:44px}.sound-toggle:after{content:'♪';font-size:13px}.sound-toggle[aria-pressed="true"]:after{content:'♫'}.murmuration-canvas{transition-duration:.9s}}
 .is-night{background:#000}.is-night .ambient i{opacity:0}
+.assembled-copy{width:min(940px,82vw)}.assembled-copy p{line-height:1.32;letter-spacing:0}.message-word{margin-right:.31em}.affection-line{line-height:1.18}.love-line{line-height:1.14}
+@media(max-width:760px){.assembled-copy{width:90vw}.assembled-copy p{font-size:clamp(14px,3.9vw,17px);line-height:1.34}.message-word{margin-right:.28em}.affection-line{font-size:20px;line-height:1.2}.love-line{font-size:26px;line-height:1.16}}
